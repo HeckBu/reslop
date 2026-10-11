@@ -2105,6 +2105,40 @@ test('agent raw log keeps terminal escapes', async () => {
   }
 });
 
+const SH_ONLY = { skip: process.platform === 'win32' };
+
+test(
+  'an agent process runs to its exit and keeps its output',
+  SH_ONLY,
+  async () => {
+    const { dir, bins, env } = fakePath('claude');
+    fs.writeFileSync(bins.claude, '#!/bin/sh\necho "fixed by $0"\n');
+    const { ui, repo } = await openUi();
+    try {
+      ui.agents.listModels = async () => [];
+      ui.agents.refresh(env);
+      await ui.agents.open();
+      ui.agents.start();
+      const job = ui.agents.jobs[0];
+      assert.equal(job.status, 'running');
+      await new Promise((resolve) => {
+        const check = () => {
+          if (job.status === 'running') setTimeout(check, 5);
+          else resolve();
+        };
+        check();
+      });
+      assert.equal(job.status, 'exit 0');
+      assert.equal(job.output, `fixed by ${bins.claude}\n`);
+      assert.equal(job.rawText, job.output);
+    } finally {
+      ui.agents.reset();
+      repo.cleanup();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
+
 test('a session opens on its last run and loads older on scroll', async () => {
   const { dir, env } = fakePath('claude');
   const { ui, repo } = await openUi();

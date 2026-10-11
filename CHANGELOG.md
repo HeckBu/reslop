@@ -2,6 +2,9 @@
 
 ## [Unreleased][unreleased]
 
+- Support Antigravity (AGY) cli agents, asking for permissions by default
+- Opt into autonomous AGY runs with `agents.agy.extra` in `.reslop` set to
+  `--dangerously-skip-permissions` (approves every tool action unasked)
 - Execute review results and plan in cli agents
 - Detect available agents and choose its model, effort, context
 - Save agent settings `.reslop`

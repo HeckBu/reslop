@@ -20,7 +20,8 @@ const render = require('../lib/render/render.js');
 const { renderFrame } = render;
 const { stripAnsi, THEME, bg, RESET, BOLD } = require('../lib/term/ansi.js');
 const { actionFromKey } = require('../lib/input/actions.js');
-const { runStats } = require('../lib/session/agents/jobs.js');
+const jobs = require('../lib/session/agents/jobs.js');
+const { runStats, launchJob } = jobs;
 
 const makeBin = (dir, name) => {
   const file = path.join(dir, name);
@@ -47,12 +48,13 @@ test('findBin returns the first executable on PATH', () => {
   }
 });
 
-test('detectAgents finds claude opencode cursor and codex clis', () => {
+test('detectAgents finds claude opencode cursor codex and agy clis', () => {
   const { dir, bins, env } = fakePath(
     'claude',
     'opencode',
     'cursor-agent',
     'codex',
+    'agy',
   );
   try {
     const list = detectAgents(env);
@@ -65,6 +67,8 @@ test('detectAgents finds claude opencode cursor and codex clis', () => {
     assert.equal(list[2].bin, bins['cursor-agent']);
     assert.equal(list[3].id, 'codex');
     assert.equal(list[3].bin, bins.codex);
+    assert.equal(list[4].id, 'agy');
+    assert.equal(list[4].bin, bins.agy);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -125,6 +129,139 @@ test('buildLaunch passes the review plan model and extra flags', () => {
   assert.equal(rel.prompt, planPrompt('.plan/a.md'));
   const relCmd = 'claude --model sonnet --effort high --foo bar .plan/a.md';
   assert.equal(rel.command, relCmd);
+});
+
+const rowOf = (spec) => ({
+  id: spec.id,
+  name: spec.name,
+  bin: `/usr/bin/${spec.bins[0]}`,
+  spec,
+  models: spec.models,
+});
+
+const agyRow = () => rowOf(AGENTS.find((item) => item.id === 'agy'));
+
+const SKIP_ASKS = '--dangerously-skip-permissions';
+
+test('buildLaunch passes the plan to agy behind its prompt flag', () => {
+  const row = agyRow();
+  const prompt = planPrompt('/tmp/plan.md');
+  const plain = buildLaunch(row, emptyChoice(row), '/tmp/plan.md');
+  assert.equal(plain.ok, true);
+  assert.equal(plain.cmd, '/usr/bin/agy');
+  assert.deepEqual(plain.args, ['-p', prompt]);
+  assert.equal(plain.command, 'agy -p /tmp/plan.md');
+  const slug = { model: 'gemini-3.8-flash', effort: 'high', extra: '' };
+  const encoded = buildLaunch(row, slug, '/tmp/plan.md');
+  const model = ['--model', 'gemini-3.8-flash-high'];
+  assert.deepEqual(encoded.args, [...model, '-p', prompt]);
+  const shown = 'agy --model gemini-3.8-flash-high -p /tmp/plan.md';
+  assert.equal(encoded.command, shown);
+  const level = { model: 'default', effort: 'high', extra: '' };
+  const flagged = buildLaunch(row, level, '/tmp/plan.md');
+  assert.deepEqual(flagged.args, ['--effort', 'high', '-p', prompt]);
+  assert.equal(flagged.command, 'agy --effort high -p /tmp/plan.md');
+});
+
+test('buildLaunch continues an agy conversation', () => {
+  const row = agyRow();
+  const id = '11111111-2222-3333-4444-555555555555';
+  const prompt = planPrompt('plan.md');
+  const kept = buildLaunch(row, emptyChoice(row), '/tmp/plan.md', '/tmp', id);
+  assert.equal(kept.ok, true);
+  assert.deepEqual(kept.args, ['--conversation', id, '-p', prompt]);
+  assert.equal(kept.session, id);
+  const choice = { ...emptyChoice(row), extra: SKIP_ASKS };
+  const free = buildLaunch(row, choice, '/tmp/plan.md', '/tmp', id);
+  const resume = ['--conversation', id];
+  assert.deepEqual(free.args, [...resume, SKIP_ASKS, '-p', prompt]);
+  assert.equal(free.session, id);
+});
+
+test('agy skips permission prompts only when the extra flags say so', () => {
+  const row = agyRow();
+  const choice = {
+    model: 'gemini-3.8-flash',
+    effort: 'high',
+    extra: SKIP_ASKS,
+  };
+  const launch = buildLaunch(row, choice, '/tmp/plan.md');
+  const model = ['--model', 'gemini-3.8-flash-high'];
+  const prompt = planPrompt('/tmp/plan.md');
+  assert.deepEqual(launch.args, [...model, SKIP_ASKS, '-p', prompt]);
+  const shown = ['agy', ...model, SKIP_ASKS, '-p', '/tmp/plan.md'];
+  assert.equal(launch.command, shown.join(' '));
+  for (const spec of AGENTS) {
+    const any = rowOf(spec);
+    const plain = buildLaunch(any, emptyChoice(any), '/tmp/plan.md');
+    assert.equal(plain.ok, true);
+    assert.equal(plain.args.includes(SKIP_ASKS), false, spec.id);
+    const args = [any, emptyChoice(any), '/tmp/plan.md', '/tmp', 'some-id'];
+    const kept = buildLaunch(...args);
+    assert.equal(kept.ok, true);
+    assert.equal(kept.args.includes(SKIP_ASKS), false, spec.id);
+  }
+});
+
+const runJob = (id, kind = 'run') => {
+  const launch = { id, name: id, cmd: `/usr/bin/${id}`, args: [], kind };
+  return launchJob(1, { ...launch, command: id, plan: '/tmp/plan.md' }, '');
+};
+
+test('an agy run that exits 0 without output has failed', () => {
+  const job = runJob('agy');
+  job.finish({ status: 0, text: '  \n' });
+  assert.equal(job.status, 'exit 1');
+  assert.equal(job.exit, 1);
+  assert.match(job.output, /exited without output/i);
+  const login = runJob('agy', 'login');
+  login.finish({ status: 0, text: '' });
+  assert.equal(login.status, 'exit 0');
+  const other = runJob('claude');
+  other.finish({ status: 0, text: '' });
+  assert.equal(other.status, 'exit 0');
+  assert.equal(other.output, '');
+  const failed = runJob('agy');
+  failed.finish({ status: 3, text: '' });
+  assert.equal(failed.status, 'exit 3');
+  assert.equal(failed.output, '');
+});
+
+test('an agy run that exits 0 on a permission denial has failed', () => {
+  const job = runJob('agy');
+  job.finish({ status: 0, text: 'Error: permission denied\n' });
+  assert.equal(job.status, 'exit 1');
+  assert.equal(job.exit, 1);
+  assert.equal(job.output, 'Error: permission denied\n');
+  const done = runJob('agy');
+  done.finish({ status: 0, text: 'Applied 3 fixes\n' });
+  assert.equal(done.status, 'exit 0');
+  const other = runJob('claude');
+  other.finish({ status: 0, text: 'Fixed the permission denied handling\n' });
+  assert.equal(other.status, 'exit 0');
+  assert.equal(other.exit, 0);
+});
+
+test('agy lists models and parses model names', () => {
+  const { spec } = agyRow();
+  const sample =
+    'Fetching available models...\n' +
+    'gemini-3.8-flash-high     Gemini 3.8 Flash (High)\n' +
+    'gemini-3.8-flash-medium   Gemini 3.8 Flash (Medium)\n' +
+    'claude-sonnet-4-6         Claude Sonnet 4.6 (Thinking)\n';
+  assert.deepEqual(spec.listCmds, [['models']]);
+  assert.deepEqual(spec.parseModels(sample), [
+    'gemini-3.8-flash-high',
+    'gemini-3.8-flash-medium',
+    'claude-sonnet-4-6',
+  ]);
+});
+
+test('agy fallback models match the cli and stop at high effort', () => {
+  const { spec } = agyRow();
+  assert.deepEqual(spec.efforts, ['default', 'low', 'medium', 'high']);
+  assert.ok(spec.models.includes('gemini-3.8-flash-high'));
+  assert.ok(spec.models.includes('gpt-oss-120b-medium'));
 });
 
 const openUi = async () => {
@@ -1199,6 +1336,60 @@ test('agents screen remembers model and effort in .reslop', async () => {
   }
 });
 
+test('agents screen keeps extra flags written in .reslop', async () => {
+  const { dir, env } = fakePath('agy');
+  const { ui, repo } = await openUi();
+  try {
+    const file = path.join(repo.dir, '.reslop');
+    const agy = { extra: SKIP_ASKS, model: 'gemini-3.8-flash' };
+    const initial = { agents: { agy } };
+    fs.writeFileSync(file, `${JSON.stringify(initial, null, 2)}\n`);
+    ui.agents.listModels = async () => [];
+    ui.agents.refresh(env);
+    await ui.agents.open();
+    assert.equal(ui.agents.choice('agy').extra, SKIP_ASKS);
+    ui.nav.agentCursor = AGENTS.findIndex((spec) => spec.id === 'agy');
+    ui.handleEvent({ type: 'key', key: 'e' });
+    ui.handleEvent({ type: 'key', key: 'down' });
+    ui.handleEvent({ type: 'key', key: 'enter' });
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.equal(saved.agents.agy.effort, 'high');
+    assert.equal(saved.agents.agy.extra, SKIP_ASKS);
+    ui.agents.choices = new Map();
+    ui.agents.refresh(env);
+    assert.equal(ui.agents.choice('agy').extra, SKIP_ASKS);
+  } finally {
+    ui.agents.reset();
+    repo.cleanup();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('only agy keeps extra flags in .reslop', async () => {
+  const { dir, env } = fakePath('claude');
+  const { ui, repo } = await openUi();
+  try {
+    const file = path.join(repo.dir, '.reslop');
+    const claude = { model: 'sonnet', extra: '--unsafe-example' };
+    const initial = { agents: { claude } };
+    fs.writeFileSync(file, `${JSON.stringify(initial, null, 2)}\n`);
+    ui.agents.listModels = async () => [];
+    ui.agents.refresh(env);
+    assert.equal(ui.agents.choice('claude').extra, '');
+    ui.agents.choice('claude').extra = '--new-example';
+    ui.agents.saveChoice('claude');
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assert.deepEqual(saved.agents.claude, {
+      model: 'sonnet',
+      effort: 'medium',
+    });
+  } finally {
+    ui.agents.reset();
+    repo.cleanup();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('recorded runs stay listed for the selected cli', async () => {
   const { dir, env } = fakePath('cursor-agent', 'claude');
   const { ui, repo } = await openUi();
@@ -2204,6 +2395,20 @@ test('run output yields the session, files, and tokens', () => {
   const usage = '{"input_tokens": 10, "output_tokens": 5}';
   assert.equal(runStats(usage).tokens, 15);
   assert.deepEqual(runStats('hello'), {});
+  const spaced = `claude --resume ${sessionId}`;
+  assert.equal(runStats(spaced).session, sessionId);
+});
+
+test('agy output yields the conversation to continue', () => {
+  const sessionId = '2fa698ba-9a19-4a84-8134-5a7cd9ec2c56';
+  const spaced = `Continue with agy --conversation ${sessionId}`;
+  assert.equal(runStats(spaced).session, sessionId);
+  const joined = `Continue with agy --conversation=${sessionId}`;
+  assert.equal(runStats(joined).session, sessionId);
+  const job = runJob('agy');
+  job.finish({ status: 0, text: `Done\n${spaced}\n` });
+  assert.equal(job.record().session, sessionId);
+  assert.equal(job.status, 'exit 0');
 });
 
 test('legacy .reslop runs move into .log', async () => {

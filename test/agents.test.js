@@ -13,6 +13,7 @@ const { mergeModels, parseCursorModels, parseCursorWide } = agents;
 const { parseNameList } = agents;
 const { parseJsonModels, commandLine, needsAuth, authState } = agents;
 const { groupModels, catalogOf } = agents;
+const { optionValues, parseHelpModels, parseJsonEfforts } = agents;
 const { Session } = require('../lib/session/session.js');
 const { createGitRepo } = require('../lib/git/git.js');
 const { makeRepo, uiSink } = require('./helpers.js');
@@ -624,6 +625,117 @@ test('parseNameList and parseJsonModels keep model ids', () => {
   assert.deepEqual(merged, ['default', 'grok-4.6', 'sonnet']);
 });
 
+const CLAUDE_HELP = [
+  'Usage: claude [options] [command] [prompt]',
+  '',
+  'Options:',
+  '  --effort <level>                Effort level for the current session',
+  '                                  (low, medium, high, xhigh, max)',
+  '  --environment <environment_id>  Create a new cloud session (a, b)',
+  '  --model <model>                 Model for the current session. Provide',
+  '                                  an alias for the latest model (e.g.',
+  `                                  'fable', 'opus', or 'sonnet') or a`,
+  `                                  model's full name.`,
+  '  -v, --version                   Output the version number',
+  '',
+  'Commands:',
+  '  auth                            Manage authentication',
+].join('\n');
+
+test('optionValues reads the values an option lists in the help', () => {
+  const levels = ['low', 'medium', 'high', 'xhigh', 'max'];
+  assert.deepEqual(optionValues(CLAUDE_HELP, '--effort'), levels);
+  assert.deepEqual(optionValues(CLAUDE_HELP, '--model'), []);
+  assert.deepEqual(optionValues(CLAUDE_HELP, '--missing'), []);
+  assert.deepEqual(optionValues(CLAUDE_HELP, ''), []);
+  const piped =
+    '  -m, --model <slug>\n      --effort <low|medium|high>  Depth\n';
+  assert.deepEqual(optionValues(piped, '--effort'), ['low', 'medium', 'high']);
+  const clap = [
+    '  -e, --effort <EFFORT>',
+    '          Reasoning depth',
+    '',
+    '          [possible values: minimal, low, high]',
+    '',
+    '  -h, --help',
+    '          Print help (a, b)',
+  ].join('\n');
+  assert.deepEqual(optionValues(clap, '--effort'), ['minimal', 'low', 'high']);
+  const yargs = '  --effort  Depth  [choices: "low", "high"]\n';
+  assert.deepEqual(optionValues(yargs, '--effort'), ['low', 'high']);
+});
+
+test('listModels reads claude aliases and efforts in one call', async () => {
+  const spec = AGENTS.find((row) => row.id === 'claude');
+  const calls = [];
+  const run = async (bin, args) => {
+    calls.push([bin, ...args]);
+    return { status: 0, stdout: CLAUDE_HELP, stderr: '' };
+  };
+  const listed = await listModels('claude', spec, { run });
+  assert.deepEqual(calls, [['claude', '--help']]);
+  assert.deepEqual(parseHelpModels(CLAUDE_HELP), ['fable', 'opus', 'sonnet']);
+  assert.deepEqual(listed.names, ['fable', 'opus', 'sonnet']);
+  assert.deepEqual(listed.efforts, ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.equal(listed.modelEfforts, null);
+  const silent = async () => ({ status: 1, stdout: '', stderr: 'no help' });
+  const none = await listModels('claude', spec, { run: silent });
+  assert.deepEqual(none.names, []);
+  assert.equal(none.efforts, null);
+});
+
+test('listModels reads the efforts agy lists in its help', async () => {
+  const spec = AGENTS.find((row) => row.id === 'agy');
+  const calls = [];
+  const run = async (bin, args) => {
+    calls.push(args.join(' '));
+    const help =
+      '  --model <slug>   Model\n  --effort <low|medium|high>   Depth\n';
+    const models =
+      'Fetching available models...\ngemini-3.8-flash-high  High\n';
+    return { status: 0, stdout: args[0] === 'models' ? models : help };
+  };
+  const listed = await listModels('agy', spec, { run });
+  assert.deepEqual(calls, ['models', '--help']);
+  assert.deepEqual(listed.names, ['gemini-3.8-flash-high']);
+  assert.deepEqual(listed.efforts, ['low', 'medium', 'high']);
+});
+
+test('the codex catalog lists efforts per model and hides some', async () => {
+  const key = 'supported_reasoning_levels';
+  const model = (slug, visibility, efforts) => {
+    const levels = efforts.map((effort) => ({ effort, description: 'depth' }));
+    return { slug, visibility, [key]: levels };
+  };
+  const catalog = {
+    models: [
+      model('gpt-a', 'list', ['low', 'high', 'ultra']),
+      model('gpt-b', 'list', []),
+      model('gpt-review', 'hide', ['low']),
+    ],
+  };
+  const text = JSON.stringify(catalog);
+  assert.deepEqual(parseJsonModels(text), ['gpt-a', 'gpt-b']);
+  const efforts = parseJsonEfforts(text);
+  assert.deepEqual([...efforts], [['gpt-a', ['low', 'high', 'ultra']]]);
+  assert.equal(parseJsonEfforts('not json').size, 0);
+  const spec = AGENTS.find((row) => row.id === 'codex');
+  const run = async () => ({ status: 0, stdout: text, stderr: '' });
+  const listed = await listModels('codex', spec, { run });
+  assert.deepEqual(listed.names, ['gpt-a', 'gpt-b']);
+  assert.deepEqual(listed.modelEfforts.get('gpt-a'), ['low', 'high', 'ultra']);
+  assert.equal(listed.efforts, null);
+});
+
+test('a full model listing replaces the built-in names', () => {
+  const known = ['default', 'gpt-old', 'o3'];
+  const full = mergeModels(known, ['gpt-new', 'gpt-next']);
+  assert.deepEqual(full, ['default', 'gpt-new', 'gpt-next']);
+  assert.deepEqual(mergeModels(known, []), known);
+  const partial = mergeModels(['default', 'sonnet', 'haiku'], ['fable'], true);
+  assert.deepEqual(partial, ['default', 'fable', 'sonnet', 'haiku']);
+});
+
 test('listModels tries the next command after an empty list', async () => {
   const spec = AGENTS.find((row) => row.id === 'cursor');
   const calls = [];
@@ -648,6 +760,36 @@ test('listModels tries the next command after an empty list', async () => {
     ['agent', '--list-models'],
     ['agent', 'models'],
   ]);
+});
+
+test('agents screen offers the efforts the cli lists', async () => {
+  const { dir, env } = fakePath('claude', 'codex');
+  const { ui, repo } = await openUi();
+  try {
+    const perModel = new Map([['gpt-a', ['low', 'ultra']]]);
+    ui.agents.listModels = async (bin, spec) => {
+      if (spec.id === 'claude') return { names: [], efforts: ['low', 'xhigh'] };
+      return { names: ['gpt-a', 'gpt-b'], modelEfforts: perModel };
+    };
+    ui.agents.refresh(env);
+    await ui.agents.open();
+    const row = (id) => ui.agents.rows().find((item) => item.id === id);
+    assert.deepEqual(row('claude').efforts, ['low', 'xhigh']);
+    assert.ok(row('claude').models.includes('haiku'));
+    assert.deepEqual(row('codex').models, ['default', 'gpt-a', 'gpt-b']);
+    const fallback = AGENTS.find((spec) => spec.id === 'codex').efforts;
+    assert.deepEqual(row('codex').efforts, fallback.slice(1));
+    ui.agents.choice('codex').model = 'gpt-a';
+    ui.agents.choice('codex').effort = 'medium';
+    assert.deepEqual(row('codex').efforts, ['low', 'ultra']);
+    assert.equal(row('codex').effort, 'low');
+    ui.agents.choice('codex').model = 'gpt-b';
+    assert.deepEqual(row('codex').efforts, fallback.slice(1));
+  } finally {
+    ui.agents.reset();
+    repo.cleanup();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('agents screen picks a model from the list', async () => {

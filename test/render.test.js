@@ -2213,7 +2213,7 @@ test('branch pane lists names and marks the default branch', () => {
   const wideFooter = stripAnsi(wide.rows.at(-1));
   assert.match(
     wideFooter,
-    /^ 🢐esc {2}insert {2}rebase {2}delete {2}pull {2}push.*files/,
+    /^ 🢐esc {2}insert {2}worktree {2}rebase {2}delete {2}pull {2}push.*files/,
   );
   assert.ok(wideFooter.includes('delete'));
   assert.ok(!footer.includes('add'));

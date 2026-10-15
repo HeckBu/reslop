@@ -809,7 +809,7 @@ test('a deleted worktree is removed from the branch tiles', async () => {
     const one = await addWorktree(app, path.join(root, 'one'), 'one');
     session = await loadSession(fakeProc(app, ['node']), {}, parseArgv([]));
     await openTiles(session);
-    fs.rmSync(one, { recursive: true, force: true });
+    await removeTree(one);
     session.trees.notePaths(['../one']);
     await session.ops.idle();
     assert.deepEqual(

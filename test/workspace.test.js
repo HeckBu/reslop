@@ -418,7 +418,7 @@ test('a deleted repository is removed from the workspace tiles', async () => {
       parseArgv([root]),
     );
     session.workspace.start();
-    fs.rmSync(beta, { recursive: true, force: true });
+    await removeTree(beta);
     session.workspace.notePaths(['beta']);
     await session.ops.idle();
     assert.deepEqual(

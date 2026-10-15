@@ -102,6 +102,14 @@ test('decodeChunk parses SGR mouse drag and release', () => {
   assert.equal(up.press, false);
 });
 
+test('decodeChunk reports mouse motion without a pressed button', () => {
+  const event = decodeChunk('\x1b[<35;10;5M').events[0];
+  assert.equal(event.kind, 'move');
+  assert.equal(event.btn, 3);
+  const shifted = decodeChunk('\x1b[<39;10;5M').events[0];
+  assert.equal(shifted.kind, 'move');
+});
+
 test('actionFromKey maps aliases and ignores unbound keys', () => {
   assert.equal(actionFromKey('right'), 'next');
   assert.equal(actionFromKey('j'), 'next');

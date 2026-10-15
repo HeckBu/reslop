@@ -342,6 +342,13 @@ const clickAt = (session, x, y) => {
   });
 };
 
+const dragBetween = (session, start, end) => {
+  const base = { type: 'mouse', btn: 0 };
+  session.handleEvent({ ...base, kind: 'press', button: 0, ...start });
+  session.handleEvent({ ...base, kind: 'drag', button: 32, ...end });
+  session.handleEvent({ ...base, kind: 'release', button: 0, ...end });
+};
+
 test('prev at first block stays put and next reaches last', async () => {
   const a = sampleItem('a.js');
   const b = sampleItem('b.js');
@@ -1412,6 +1419,186 @@ test('todos screen ignores commit and todo hotkeys', async () => {
   assert.equal(session.mode, 'review');
   session.dispatch('tasks');
   assert.equal(session.mode, 'review');
+});
+
+test('right click opens task operations with their hotkeys', async () => {
+  const { session } = await openSession([sampleItem('a.js')]);
+  session.notes.addTask('a.js', 'context target');
+  session.composer.tasks.openTasksPage();
+  session.draw();
+  const hit = session.lastFrame.taskHits.find(
+    (entry) => entry.cursor === 0 && !entry.check,
+  );
+  assert.ok(hit);
+  session.handleEvent({
+    type: 'mouse',
+    kind: 'press',
+    btn: 2,
+    button: 2,
+    x: 10,
+    y: hit.y,
+    press: true,
+  });
+  session.draw();
+  assert.equal(session.tasksFocus, 0);
+  assert.deepEqual(session.nav.contextMenu.actions, [
+    'open',
+    'check',
+    'import',
+    'drop',
+  ]);
+  const menuRows = session.lastFrame.contextHits.map((entry) =>
+    stripAnsi(session.lastFrame.rows[entry.y - 1]).trim(),
+  );
+  assert.ok(menuRows.some((row) => row.includes('import')));
+  assert.ok(menuRows.some((row) => row.includes('delete')));
+  session.handleEvent({ type: 'key', key: 'i' });
+  assert.equal(session.mode, 'import');
+  assert.equal(session.nav.contextMenu, null);
+  session.handleEvent({ type: 'key', key: 'escape' });
+});
+
+const rightClick = (session, x, y) => {
+  session.handleEvent({
+    type: 'mouse',
+    kind: 'press',
+    btn: 2,
+    button: 2,
+    x,
+    y,
+    press: true,
+  });
+  session.draw();
+};
+
+test('blank branch space offers screen commands', async () => {
+  const { session } = await openSession([sampleItem('a.js')]);
+  session.pane = 'files';
+  session.draw();
+  rightClick(session, 20, session.lastFrame.height - 3);
+  assert.equal(session.nav.contextMenu, null);
+  session.pane = 'branches';
+  session.gitBranches.branches = [{ name: 'main', current: true }];
+  session.draw();
+  rightClick(session, 20, session.lastFrame.height - 3);
+  assert.deepEqual(session.nav.contextMenu.actions, [
+    'newBranch',
+    'worktreeBranch',
+    'pull',
+    'push',
+  ]);
+  assert.equal(session.nav.contextMenu.actions.includes('back'), false);
+  session.handleEvent({ type: 'key', key: 'insert' });
+  assert.equal(session.composeKind, 'branch');
+});
+
+test('dashboard and combo boxes suppress context menus', async () => {
+  const { session } = await openSession([sampleItem('a.js')]);
+  session.pane = 'dashboard';
+  session.draw();
+  rightClick(session, 10, 3);
+  assert.equal(session.nav.contextMenu, null);
+  session.pane = 'agents';
+  session.draw();
+  session.lastFrame.fileHits = [];
+  rightClick(session, 10, session.lastFrame.height - 3);
+  assert.equal(session.nav.contextMenu, null);
+  session.lastFrame.fileHits = [
+    { y: 3, x0: 0, x1: 20, cursor: 0, field: 'effort' },
+  ];
+  rightClick(session, 10, 3);
+  assert.equal(session.nav.contextMenu, null);
+  session.lastFrame.fileHits = [
+    { y: 3, x0: 0, x1: 20, cursor: 0, field: 'name' },
+  ];
+  rightClick(session, 10, 3);
+  const actions = session.nav.contextMenu.actions;
+  for (const id of [
+    'agentEffort',
+    'agentModel',
+    'agentContext',
+    'agentReview',
+  ]) {
+    assert.equal(actions.includes(id), false);
+  }
+});
+
+test('context menus track hover and refuse disabled actions', async () => {
+  const { session, repo } = await openSession([sampleItem('a.js')]);
+  session.pane = 'branches';
+  session.gitBranches.branches = [{ name: 'main', current: true }];
+  session.draw();
+  const row = session.lastFrame.fileHits[0];
+  rightClick(session, 10, row.y);
+  assert.ok(session.nav.contextMenu.disabled.includes('drop'));
+  const drop = session.lastFrame.contextHits.find((hit) => hit.id === 'drop');
+  assert.equal(drop.disabled, true);
+  session.handleEvent({ type: 'key', key: 'delete' });
+  assert.equal(session.mode, 'review');
+  assert.ok(session.nav.contextMenu);
+  clickAt(session, drop.x0 + 2, drop.y);
+  assert.ok(session.nav.contextMenu);
+  const pull = session.lastFrame.contextHits.find((hit) => hit.id === 'pull');
+  session.pushInput(`\x1b[<35;${pull.x0 + 2};${pull.y}M`);
+  assert.equal(session.nav.contextMenu.cursor, pull.cursor);
+  assert.equal(repo.drops.length, 0);
+  session.handleEvent({ type: 'key', key: 'escape' });
+  assert.equal(session.nav.contextMenu, null);
+});
+
+test('editor context commands preserve and edit selected text', async () => {
+  const { session, stdout } = await openSession([sampleItem('a.js')]);
+  session.dispatch('tasks');
+  session.pushInput('keep this text');
+  const editor = session.editor;
+  editor.anchor = 5;
+  editor.cursor = 9;
+  session.draw();
+  const hit = session.lastFrame.editHits.find((entry) => entry.live);
+  rightClick(session, hit.textX, hit.y);
+  assert.deepEqual(session.nav.contextMenu.actions, [
+    'textCut',
+    'textCopy',
+    'textPaste',
+    'textDelete',
+    'textSelectAll',
+  ]);
+  session.handleEvent({ type: 'key', key: 'ctrl-c' });
+  assert.ok(stdout.dump().includes(Buffer.from('this').toString('base64')));
+  assert.equal(editor.selectedText(), 'this');
+  rightClick(session, hit.textX, hit.y);
+  session.handleEvent({ type: 'key', key: 'delete' });
+  assert.equal(editor.text, 'keep  text');
+  assert.equal(session.mode, 'compose');
+  session.draw();
+  rightClick(session, hit.textX, hit.y);
+  session.handleEvent({ type: 'key', key: 'ctrl-a' });
+  assert.equal(editor.selectedText(), 'keep  text');
+  rightClick(session, hit.textX, hit.y);
+  session.handleEvent({ type: 'key', key: 'ctrl-x' });
+  assert.equal(editor.text, '');
+});
+
+test('import textbox context paste keeps the textbox focused', async () => {
+  const { session } = await openSession([sampleItem('a.js')]);
+  session.composer.tasks.openTasksPage();
+  session.dispatch('import');
+  session.draw();
+  const statusY = session.lastFrame.height - 1;
+  const saved = clipboard.pasteText;
+  clipboard.pasteText = () => 'https://example.com/a\n';
+  try {
+    rightClick(session, 10, statusY);
+    const paste = session.lastFrame.contextHits.find(
+      (hit) => hit.id === 'textPaste',
+    );
+    clickAt(session, paste.x0 + 2, paste.y);
+    assert.equal(session.mode, 'import');
+    assert.equal(session.nav.import.url, 'https://example.com/a');
+    assert.equal(session.nav.contextMenu, null);
+  } finally {
+    clipboard.pasteText = saved;
+  }
 });
 
 test('todo list scrolls the focused row into view', async () => {
@@ -6317,6 +6504,167 @@ test('editors select with shift and copy cut paste', async () => {
   const taskAfter = rowOf('zxqv');
   assert.equal(stripAnsi(taskBefore), stripAnsi(taskAfter));
   assert.notEqual(taskBefore, taskAfter);
+});
+
+for (const [kind, pane] of [
+  ['feedback', 'diff'],
+  ['branch', 'branches'],
+  ['worktree', 'branches'],
+  ['commit', 'commits'],
+  ['package', 'packages'],
+  ['npm', 'npm'],
+  ['tasks', 'tasks'],
+]) {
+  test(`mouse and keyboard share selection in the ${kind} editor`, async () => {
+    const { session, stdout } = await openSession([sampleItem('a.js')]);
+    if (kind === 'tasks') session.composer.tasks.openTasksPage();
+    session.pane = pane;
+    session.composer.openCompose(kind, 'hello world');
+    if (kind === 'npm') session.npm.editField = 'name';
+    session.editor.place(0);
+    session.draw();
+    const hit = session.lastFrame.editHits.find((entry) => entry.live);
+    assert.ok(hit, kind);
+    const before = stdout.dump().length;
+    dragBetween(
+      session,
+      { x: hit.textX, y: hit.y },
+      { x: hit.textX + 5, y: hit.y },
+    );
+    assert.equal(session.editor.selectedText(), 'hello');
+    assert.equal(session.nav.selection, null);
+    assert.equal(session.nav.editDrag, null);
+    assert.equal(stdout.dump().length, before);
+    press(session, 'shift-right');
+    assert.equal(session.editor.selectedText(), 'hello ');
+    press(session, 'ctrl-c');
+    assert.equal(session.status, 'copied');
+    assert.ok(stdout.dump().includes(Buffer.from('hello ').toString('base64')));
+    rightClick(session, hit.textX + 1, hit.y);
+    press(session, 'ctrl-c');
+    assert.equal(session.editor.selectedText(), 'hello ');
+    assert.equal(session.nav.contextMenu, null);
+    assert.equal(session.mode, 'compose');
+  });
+}
+
+test('code mouse selection spans lines and whole wide characters', async () => {
+  const { session, stdout } = await openSession([sampleItem('a.js')]);
+  session.dispatch('code');
+  session.editor.replace('ab中👁️\ncd');
+  session.editor.place(0);
+  session.draw();
+  const hits = session.lastFrame.editHits;
+  assert.equal(hits.length, 2);
+  dragBetween(
+    session,
+    { x: hits[0].textX + 1, y: hits[0].y },
+    { x: hits[1].textX + 1, y: hits[1].y },
+  );
+  assert.equal(session.editor.selectedText(), 'b中👁️\nc');
+  press(session, 'ctrl-c');
+  assert.ok(stdout.dump().includes(Buffer.from('b中👁️\nc').toString('base64')));
+  press(session, 'shift-right');
+  assert.equal(session.editor.selectedText(), 'b中👁️\ncd');
+  assert.equal(session.nav.selection, null);
+});
+
+test('reverse mouse drags select scrolled file text', async () => {
+  const { session } = await openSession([sampleItem('a.js')]);
+  session.pane = 'unit';
+  session.nav.reviewPath = 'a.js';
+  session.composer.openCompose('file', '0123456789'.repeat(20));
+  session.composer.afterEdit();
+  session.draw();
+  const hit = session.lastFrame.editHits[0];
+  const scroll = hit.scroll;
+  assert.ok(scroll > 0);
+  dragBetween(
+    session,
+    { x: hit.textX + 5, y: hit.y },
+    { x: hit.textX + 1, y: hit.y },
+  );
+  assert.equal(
+    session.editor.selectedText(),
+    session.editor.text.slice(scroll + 1, scroll + 5),
+  );
+  assert.ok(session.editor.anchor > session.editor.cursor);
+  assert.equal(session.nav.selection, null);
+});
+
+test('mouse selection spans visually wrapped feedback', async () => {
+  const { session, stdout } = await openSession([sampleItem('a.js')]);
+  stdout.columns = 20;
+  session.composer.openCompose('feedback', 'alpha beta gamma delta epsilon');
+  session.editor.place(0);
+  session.draw();
+  const hits = session.lastFrame.editHits;
+  assert.equal(hits.length, 2);
+  dragBetween(
+    session,
+    { x: hits[0].textX + 6, y: hits[0].y },
+    { x: hits[1].textX + 2, y: hits[1].y },
+  );
+  assert.equal(session.editor.selectedText(), 'beta gamma de');
+  assert.equal(session.nav.selection, null);
+});
+
+test('find and import mouse selections use their line editors', async () => {
+  const { session } = await openSession([sampleItem('hello-world.js')]);
+  session.pane = 'files';
+  press(session, '/');
+  session.pushInput('hello');
+  session.draw();
+  let hit = session.lastFrame.editHits.find((entry) => entry.editor);
+  dragBetween(
+    session,
+    { x: hit.textX + 1, y: hit.y },
+    { x: hit.textX + 4, y: hit.y },
+  );
+  assert.equal(session.nav.find.editor.selectedText(), 'ell');
+  press(session, 'shift-right');
+  assert.equal(session.nav.find.editor.selectedText(), 'ello');
+  press(session, 'ctrl-c');
+  assert.equal(session.status, 'copied');
+  press(session, 'escape');
+  session.composer.tasks.openTasksPage();
+  session.dispatch('import');
+  session.pushInput('https://example.com');
+  session.draw();
+  hit = session.lastFrame.editHits.find((entry) => entry.editor);
+  dragBetween(
+    session,
+    { x: hit.textX + 8, y: hit.y },
+    { x: hit.textX + 15, y: hit.y },
+  );
+  assert.equal(session.nav.import.editor.selectedText(), 'example');
+  rightClick(session, hit.textX + 10, hit.y);
+  press(session, 'ctrl-c');
+  assert.equal(session.nav.import.editor.selectedText(), 'example');
+  assert.equal(session.mode, 'import');
+  assert.equal(session.nav.selection, null);
+});
+
+test('the plan query keeps mouse selection in the open combo', async () => {
+  const { session } = await openSession([sampleItem('a.js')]);
+  session.composer.tasks.openTasksPage();
+  session.composer.tasks.togglePlanMenu();
+  session.pushInput('plan');
+  session.draw();
+  const hit = session.lastFrame.editHits.find((entry) => entry.editor);
+  assert.ok(hit);
+  dragBetween(
+    session,
+    { x: hit.textX, y: hit.y },
+    { x: hit.textX + 2, y: hit.y },
+  );
+  assert.equal(session.composer.tasks.planPick.editor.selectedText(), 'pl');
+  press(session, 'shift-right');
+  assert.equal(session.composer.tasks.planPick.editor.selectedText(), 'pla');
+  press(session, 'ctrl-c');
+  assert.equal(session.status, 'copied');
+  assert.equal(session.composer.tasks.planOpen, true);
+  assert.equal(session.nav.selection, null);
 });
 
 test('find import and plan lines select and use the clipboard', async () => {

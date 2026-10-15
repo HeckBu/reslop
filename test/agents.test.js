@@ -1118,6 +1118,41 @@ test('clicking the model column opens the model list', async () => {
   }
 });
 
+test('mouse and keyboard share selection in an agent query', async () => {
+  const { dir, env } = fakePath('cursor-agent');
+  const { ui, repo } = await openUi();
+  try {
+    ui.agents.listModels = listed;
+    ui.agents.refresh(env);
+    await ui.agents.open();
+    const rows = ui.agents.rows();
+    ui.nav.agentCursor = rows.findIndex((row) => row.id === 'cursor');
+    ui.agents.openPick('model');
+    const pick = ui.agents.pick;
+    pick.editor.replace('sol');
+    pick.touch();
+    ui.draw();
+    const editor = pick.editor;
+    const hit = ui.lastFrame.editHits.find((entry) => entry.editor === editor);
+    assert.ok(hit);
+    const base = { type: 'mouse', btn: 0, y: hit.y };
+    ui.handleEvent({ ...base, kind: 'press', button: 0, x: hit.textX });
+    ui.handleEvent({ ...base, kind: 'drag', button: 32, x: hit.textX + 2 });
+    ui.handleEvent({ ...base, kind: 'release', button: 0, x: hit.textX + 2 });
+    assert.equal(pick.editor.selectedText(), 'so');
+    ui.handleEvent({ type: 'key', key: 'shift-right' });
+    assert.equal(pick.editor.selectedText(), 'sol');
+    ui.handleEvent({ type: 'key', key: 'ctrl-c' });
+    assert.equal(ui.status, 'copied');
+    assert.equal(ui.nav.selection, null);
+    assert.equal(ui.agents.pick, pick);
+  } finally {
+    ui.agents.reset();
+    repo.cleanup();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('clicking another column switches the open combo', async () => {
   const { dir, env } = fakePath('cursor-agent');
   const { ui, repo } = await openUi();

@@ -765,6 +765,29 @@ test('the worktree that is shown is not removed from its tiles', async () => {
   }
 });
 
+test('a deleted worktree is removed from the branch tiles', async () => {
+  const root = tempDir('reslop-wt-');
+  let session = null;
+  try {
+    const app = path.join(root, 'app');
+    initRepo(app);
+    const one = await addWorktree(app, path.join(root, 'one'), 'one');
+    session = await loadSession(fakeProc(app, ['node']), {}, parseArgv([]));
+    await openTiles(session);
+    fs.rmSync(one, { recursive: true, force: true });
+    session.trees.notePaths(['../one']);
+    await session.ops.idle();
+    assert.deepEqual(
+      session.trees.rows.map((row) => row.name),
+      ['app'],
+    );
+    assert.equal(session.worktrees.hasPanels(), false);
+  } finally {
+    if (session) stopSession(session);
+    await removeTree(root);
+  }
+});
+
 test('a read only session does not change worktrees', async () => {
   const root = tempDir('reslop-wt-');
   let session = null;

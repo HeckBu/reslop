@@ -403,3 +403,30 @@ test('opening a folder of repositories starts on repo tiles', async () => {
     await removeTree(root);
   }
 });
+
+test('a deleted repository is removed from the workspace tiles', async () => {
+  const root = tempDir('reslop-ws-');
+  const alpha = path.join(root, 'alpha');
+  const beta = path.join(root, 'beta');
+  let session = null;
+  try {
+    initRepo(alpha);
+    initRepo(beta);
+    session = await loadSession(
+      fakeProc(root, ['node', 'reslop', root]),
+      {},
+      parseArgv([root]),
+    );
+    session.workspace.start();
+    fs.rmSync(beta, { recursive: true, force: true });
+    session.workspace.notePaths(['beta']);
+    await session.ops.idle();
+    assert.deepEqual(
+      session.workspace.rows.map((row) => row.name),
+      ['alpha'],
+    );
+  } finally {
+    if (session) stopSession(session);
+    await removeTree(root);
+  }
+});
